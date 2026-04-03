@@ -1,0 +1,821 @@
+API Assignment Spec — Amazon, Facebook & Instagram Clones
+Conventions (apply to all 3 projects)
+Base URL: https://api.example.com/v1
+
+
+Auth: Bearer JWT in Authorization: Bearer <token> unless noted public.
+
+
+Content-Type: application/json (file uploads use multipart/form-data).
+
+
+Pagination: ?page=<int>&limit=<int>; responses wrap lists as { "data": [...], "page": 1, "limit": 20, "total": 123 }.
+
+
+Sorting & filtering: ?sort=field,-field&filter[field]=value.
+
+
+Timestamps: ISO 8601 UTC created_at, updated_at.
+
+
+Errors:
+
+ { "error": { "code": "RESOURCE_NOT_FOUND", "message": "Not found", "details": [] } }
+
+
+ID format: UUID v4 unless otherwise stated.
+
+
+Soft-deletes: deleted_at nullable where relevant.
+
+
+Field naming: snake_case in DB, camelCase in JSON.
+
+
+
+Project A — Amazon (E-commerce) Clone
+Core Entities & DB Schema (DDL-style)
+-- Users & Auth
+CREATE TABLE users (
+  id UUID PRIMARY KEY,
+  email TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  full_name TEXT NOT NULL,
+  phone TEXT,
+  role TEXT NOT NULL DEFAULT 'customer', -- customer|admin|seller
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE addresses (
+  id UUID PRIMARY KEY,
+  user_id UUID REFERENCES users(id),
+  label TEXT, -- "Home", "Work"
+  full_name TEXT NOT NULL,
+  line1 TEXT NOT NULL, line2 TEXT,
+  city TEXT NOT NULL, state TEXT, postal_code TEXT NOT NULL,
+  country TEXT NOT NULL,
+  phone TEXT,
+  is_default BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL
+);
+
+-- Catalog
+CREATE TABLE categories (
+  id UUID PRIMARY KEY,
+  name TEXT NOT NULL,
+  slug TEXT UNIQUE NOT NULL,
+  parent_id UUID REFERENCES categories(id),
+  created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE products (
+  id UUID PRIMARY KEY,
+  sku TEXT UNIQUE,
+  title TEXT NOT NULL,
+  slug TEXT UNIQUE NOT NULL,
+  description TEXT,
+  brand TEXT,
+  price_cents INT NOT NULL,
+  currency CHAR(3) NOT NULL DEFAULT 'USD',
+  category_id UUID REFERENCES categories(id),
+  avg_rating NUMERIC(2,1) DEFAULT 0,
+  review_count INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE product_images (
+  id UUID PRIMARY KEY,
+  product_id UUID REFERENCES products(id),
+  url TEXT NOT NULL,
+  is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE inventory (
+  id UUID PRIMARY KEY,
+  product_id UUID REFERENCES products(id) UNIQUE,
+  quantity INT NOT NULL DEFAULT 0,
+  reserved INT NOT NULL DEFAULT 0,
+  warehouse TEXT,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+-- Cart & Wishlist
+CREATE TABLE carts (
+  id UUID PRIMARY KEY,
+  user_id UUID REFERENCES users(id) UNIQUE,
+  created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE cart_items (
+  id UUID PRIMARY KEY,
+  cart_id UUID REFERENCES carts(id),
+  product_id UUID REFERENCES products(id),
+  quantity INT NOT NULL CHECK (quantity > 0),
+  price_cents INT NOT NULL, currency CHAR(3) NOT NULL DEFAULT 'USD',
+  created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE(cart_id, product_id)
+);
+
+CREATE TABLE wishlists (
+  id UUID PRIMARY KEY,
+  user_id UUID REFERENCES users(id) UNIQUE,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE wishlist_items (
+  id UUID PRIMARY KEY,
+  wishlist_id UUID REFERENCES wishlists(id),
+  product_id UUID REFERENCES products(id),
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE(wishlist_id, product_id)
+);
+
+-- Orders & Payments
+CREATE TABLE orders (
+  id UUID PRIMARY KEY,
+  user_id UUID REFERENCES users(id),
+  address_id UUID REFERENCES addresses(id),
+  status TEXT NOT NULL, -- created|paid|shipped|delivered|cancelled|refunded
+  subtotal_cents INT NOT NULL,
+  shipping_cents INT NOT NULL,
+  tax_cents INT NOT NULL,
+  total_cents INT NOT NULL,
+  currency CHAR(3) NOT NULL DEFAULT 'USD',
+  payment_id UUID,
+  placed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE order_items (
+  id UUID PRIMARY KEY,
+  order_id UUID REFERENCES orders(id),
+  product_id UUID REFERENCES products(id),
+  title TEXT NOT NULL,
+  price_cents INT NOT NULL,
+  quantity INT NOT NULL,
+  currency CHAR(3) NOT NULL DEFAULT 'USD'
+);
+
+CREATE TABLE payments (
+  id UUID PRIMARY KEY,
+  order_id UUID REFERENCES orders(id) UNIQUE,
+  provider TEXT NOT NULL, -- stripe|razorpay|paypal
+  provider_ref TEXT,
+  status TEXT NOT NULL, -- initiated|authorized|captured|failed|refunded
+  amount_cents INT NOT NULL, currency CHAR(3) NOT NULL DEFAULT 'USD',
+  created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL
+);
+
+-- Reviews
+CREATE TABLE reviews (
+  id UUID PRIMARY KEY,
+  product_id UUID REFERENCES products(id),
+  user_id UUID REFERENCES users(id),
+  rating INT CHECK (rating BETWEEN 1 AND 5),
+  title TEXT, body TEXT,
+  helpful_count INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE(product_id, user_id)
+);
+
+-- Admin Ops & Logs
+CREATE TABLE audit_logs (
+  id UUID PRIMARY KEY,
+  user_id UUID REFERENCES users(id),
+  action TEXT NOT NULL,
+  target_type TEXT, target_id UUID,
+  meta JSONB,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+Response Models (JSON)
+User (public):
+
+ { "id":"uuid","email":"x@y.com","fullName":"Jane Doe","role":"customer","createdAt":"..." }
+
+
+Product (public):
+
+ { "id":"uuid","sku":"SKU123","title":"Item","slug":"item","description":"...","brand":"Acme",
+  "price":{"amount":1299,"currency":"USD"},
+  "category":{"id":"uuid","name":"Laptops","slug":"laptops"},
+  "images":[{"url":"...","isPrimary":true}],
+  "rating":{"avg":4.5,"count":120}
+}
+
+
+Order (private):
+
+ { "id":"uuid","status":"paid",
+  "amounts":{"subtotal":10000,"shipping":500,"tax":1800,"total":12300,"currency":"USD"},
+  "items":[{"productId":"uuid","title":"...", "price":10000,"quantity":1}],
+  "address":{"fullName":"...","line1":"...","city":"..."},
+  "placedAt":"..."
+}
+
+
+Endpoints (~58)
+Auth & Users (9)
+POST /auth/register — body {email,password,fullName} → {token,user}
+
+
+POST /auth/login — {email,password} → {token,user}
+
+
+POST /auth/refresh — {refreshToken} → {token}
+
+
+POST /auth/logout — none → 204
+
+
+GET /me — auth → User
+
+
+PATCH /me — {fullName,phone} → User
+
+
+GET /users/:id (admin or self) → User
+
+
+GET /users (admin) ?role,is_active,page,limit → paged list
+
+
+PATCH /users/:id/status (admin) {is_active,role} → User
+
+
+Addresses (5)
+ 10. GET /me/addresses → list
+ 11. POST /me/addresses → created address
+ 12. PATCH /me/addresses/:id
+ 13. DELETE /me/addresses/:id → 204
+ 14. POST /me/addresses/:id/default → address
+Categories & Products (13)
+ 15. GET /categories → tree/list
+ 16. POST /categories (admin)
+ 17. PATCH /categories/:id (admin)
+ 18. DELETE /categories/:id (admin)
+ 19. GET /products ?q,category,price_min,price_max,sort,page,limit → paged
+ 20. POST /products (admin)
+ 21. GET /products/:id
+ 22. PATCH /products/:id (admin)
+ 23. DELETE /products/:id (admin)
+ 24. GET /products/:id/images
+ 25. POST /products/:id/images (admin, multipart)
+ 26. DELETE /product_images/:imageId (admin)
+ 27. GET /products/:id/similar → list
+Inventory (4)
+ 28. GET /inventory/:productId (admin)
+ 29. PATCH /inventory/:productId (admin) {quantity,reserved,warehouse}
+ 30. GET /inventory (admin) ?low_stock=<int> → list
+ 31. POST /inventory/bulk_adjust (admin) [{productId,delta}] → summary
+Cart (6)
+ 32. GET /me/cart → Cart
+ 33. POST /me/cart/items {productId,quantity} → Cart
+ 34. PATCH /me/cart/items/:itemId {quantity} → Cart
+ 35. DELETE /me/cart/items/:itemId → Cart
+ 36. POST /me/cart/apply_coupon {code} → Cart
+ 37. DELETE /me/cart → empties cart
+Wishlist (4)
+ 38. GET /me/wishlist → list
+ 39. POST /me/wishlist {productId} → item
+ 40. DELETE /me/wishlist/:itemId → 204
+ 41. GET /me/wishlist/check/:productId → {inWishlist:true|false}
+Orders (8)
+ 42. POST /orders {addressId,paymentProvider} → Order (status created)
+ 43. GET /orders/:id (owner/admin)
+ 44. GET /orders (owner) ?status,page,limit
+ 45. POST /orders/:id/cancel (owner if not shipped) → Order
+ 46. POST /orders/:id/ship (admin) {carrier,tracking} → Order
+ 47. POST /orders/:id/mark_delivered (admin) → Order
+ 48. POST /orders/:id/refund (admin) {reason} → Payment
+ 49. GET /orders/:id/invoice → PDF stream
+Payments (4)
+ 50. POST /payments/:orderId/initiate {provider} → {paymentIntent,...}
+ 51. POST /payments/webhook/:provider (public) → 204
+ 52. GET /payments/:orderId/status → Payment
+ 53. POST /payments/:orderId/capture (admin) → Payment
+Reviews (6)
+ 54. GET /products/:id/reviews ?page,limit,sort → paged
+ 55. POST /products/:id/reviews {rating,title,body} → Review
+ 56. PATCH /reviews/:id (owner/mod)
+ 57. DELETE /reviews/:id (owner/mod)
+ 58. POST /reviews/:id/mark_helpful → Review
+ 59. GET /me/reviews → list
+Admin & Analytics (5)
+ 60. GET /admin/metrics/sales ?from,to,granularity
+ 61. GET /admin/metrics/top_products ?from,to,limit
+ 62. GET /admin/audit_logs ?user,action,page,limit
+ 63. GET /admin/users/export → CSV stream
+ 64. POST /admin/catalog/reindex → {status:"queued"}
+Note: Count = 64 (≥50).
+
+Project B — Facebook (Social Network) Clone
+Core Entities & DB Schema
+CREATE TABLE users (
+  id UUID PRIMARY KEY, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL,
+  full_name TEXT NOT NULL, username TEXT UNIQUE NOT NULL,
+  bio TEXT, avatar_url TEXT, cover_url TEXT,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE friendships (
+  id UUID PRIMARY KEY,
+  requester_id UUID REFERENCES users(id),
+  addressee_id UUID REFERENCES users(id),
+  status TEXT NOT NULL, -- pending|accepted|declined|blocked
+  created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE(requester_id, addressee_id)
+);
+
+CREATE TABLE posts (
+  id UUID PRIMARY KEY,
+  author_id UUID REFERENCES users(id),
+  body TEXT, privacy TEXT NOT NULL DEFAULT 'friends', -- public|friends|private
+  media_url TEXT, media_type TEXT, -- image|video
+  like_count INT NOT NULL DEFAULT 0, comment_count INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE comments (
+  id UUID PRIMARY KEY,
+  post_id UUID REFERENCES posts(id),
+  author_id UUID REFERENCES users(id),
+  body TEXT NOT NULL,
+  parent_id UUID REFERENCES comments(id),
+  created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE reactions (
+  id UUID PRIMARY KEY,
+  user_id UUID REFERENCES users(id),
+  target_type TEXT NOT NULL, -- post|comment
+  target_id UUID NOT NULL,
+  type TEXT NOT NULL, -- like|love|haha|wow|sad|angry
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE(user_id, target_type, target_id)
+);
+
+CREATE TABLE groups (
+  id UUID PRIMARY KEY,
+  name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL,
+  description TEXT, privacy TEXT NOT NULL DEFAULT 'public', -- public|private
+  owner_id UUID REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE group_members (
+  id UUID PRIMARY KEY,
+  group_id UUID REFERENCES groups(id),
+  user_id UUID REFERENCES users(id),
+  role TEXT NOT NULL DEFAULT 'member', -- member|admin|moderator
+  status TEXT NOT NULL DEFAULT 'joined', -- joined|pending
+  created_at TIMESTAMPTZ NOT NULL, UNIQUE(group_id,user_id)
+);
+
+CREATE TABLE pages (
+  id UUID PRIMARY KEY,
+  name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL,
+  category TEXT, about TEXT,
+  owner_id UUID REFERENCES users(id),
+  follower_count INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE messages (
+  id UUID PRIMARY KEY,
+  thread_id UUID NOT NULL,
+  sender_id UUID REFERENCES users(id),
+  body TEXT, media_url TEXT,
+  created_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX ON messages(thread_id, created_at);
+
+CREATE TABLE notifications (
+  id UUID PRIMARY KEY,
+  user_id UUID REFERENCES users(id),
+  type TEXT NOT NULL, -- friend_request|comment|reaction|group_invite|message
+  ref_type TEXT, ref_id UUID,
+  is_read BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+Representative JSON
+Post:
+
+ { "id":"uuid","author":{"id":"uuid","fullName":"..."}, "body":"Hello!",
+  "media":{"url":null,"type":null}, "privacy":"friends",
+  "counts":{"likes":3,"comments":2}, "createdAt":"..." }
+
+
+Endpoints (~60)
+Auth & Profile (10)
+POST /auth/register → {token,user}
+
+
+POST /auth/login → {token,user}
+
+
+POST /auth/refresh
+
+
+POST /auth/logout → 204
+
+
+GET /me → User
+
+
+PATCH /me {fullName,bio,username} → User
+
+
+POST /me/avatar (multipart) → User
+
+
+POST /me/cover (multipart) → User
+
+
+GET /users/:id → public profile
+
+
+GET /users ?q,page,limit → people search
+
+
+Friendships (8)
+ 11. POST /friends/requests {toUserId} → request
+ 12. GET /friends/requests → incoming/outgoing
+ 13. POST /friends/requests/:id/accept → friendship
+ 14. POST /friends/requests/:id/decline
+ 15. GET /users/:id/friends ?page,limit
+ 16. DELETE /friends/:userId → unfriend
+ 17. POST /users/:id/block → block relation
+ 18. DELETE /users/:id/block → unblock
+Posts & Feeds (12)
+ 19. GET /feed ?page,limit → personalized feed
+ 20. POST /posts {body,privacy,media} (multipart for media) → Post
+ 21. GET /posts/:id
+ 22. DELETE /posts/:id (owner/mod)
+ 23. PATCH /posts/:id {body,privacy}
+ 24. GET /users/:id/posts ?page,limit
+ 25. GET /posts/:id/shares
+ 26. POST /posts/:id/share → share record
+ 27. GET /posts/trending ?window=day|week
+ 28. GET /search/posts ?q,page,limit
+ 29. GET /posts/:id/visibility → {privacy,canView:true}
+ 30. POST /posts/:id/report {reason}
+Comments & Reactions (11)
+ 31. GET /posts/:id/comments ?page,limit
+ 32. POST /posts/:id/comments {body,parentId?} → Comment
+ 33. PATCH /comments/:id {body}
+ 34. DELETE /comments/:id
+ 35. POST /posts/:id/reactions {type} → reaction summary
+ 36. DELETE /posts/:id/reactions → remove self reaction
+ 37. POST /comments/:id/reactions {type}
+ 38. DELETE /comments/:id/reactions
+ 39. GET /posts/:id/reactions ?type
+ 40. GET /comments/:id/reactions
+ 41. GET /me/activity → recent posts/comments/reactions
+Groups (8)
+ 42. POST /groups {name,description,privacy} → Group
+ 43. GET /groups ?q,page,limit
+ 44. GET /groups/:id
+ 45. POST /groups/:id/join → membership
+ 46. POST /groups/:id/leave
+ 47. POST /groups/:id/members/:userId/role {role} (admin)
+ 48. GET /groups/:id/posts ?page,limit
+ 49. POST /groups/:id/posts → Post
+Pages (6)
+ 50. POST /pages {name,about,category} → Page
+ 51. GET /pages ?q,page,limit
+ 52. GET /pages/:id
+ 53. POST /pages/:id/follow → {following:true}
+ 54. DELETE /pages/:id/follow
+ 55. POST /pages/:id/posts → page post
+Messaging (6)
+ 56. GET /threads ?page,limit
+ 57. POST /threads {participantIds:[...]} → thread descriptor
+ 58. GET /threads/:threadId/messages ?page,limit
+ 59. POST /threads/:threadId/messages {body,media?} → message
+ 60. POST /threads/:threadId/read → 204
+ 61. GET /threads/:threadId/typing (SSE/websocket stub OK)
+Notifications & Admin (5)
+ 62. GET /notifications ?page,limit
+ 63. POST /notifications/:id/read → 204
+ 64. GET /admin/audit_logs (admin)
+ 65. GET /admin/users (admin) ?q,page,limit
+ 66. POST /admin/posts/:id/hide (mod) → Post
+Note: Count = 66 (≥50).
+
+Project C — Instagram (Photo/Video Sharing) Clone
+Core Entities & DB Schema
+CREATE TABLE users (
+  id UUID PRIMARY KEY, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL,
+  username TEXT UNIQUE NOT NULL, full_name TEXT NOT NULL,
+  bio TEXT, avatar_url TEXT,
+  is_verified BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE follows (
+  id UUID PRIMARY KEY,
+  follower_id UUID REFERENCES users(id),
+  followee_id UUID REFERENCES users(id),
+  status TEXT NOT NULL DEFAULT 'accepted', -- accepted|requested|blocked
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE(follower_id, followee_id)
+);
+
+CREATE TABLE media (
+  id UUID PRIMARY KEY,
+  owner_id UUID REFERENCES users(id),
+  type TEXT NOT NULL, -- image|video|carousel
+  urls JSONB NOT NULL, -- {items:[{url,width,height}], thumb:"..."}
+  caption TEXT, location TEXT,
+  like_count INT NOT NULL DEFAULT 0, comment_count INT NOT NULL DEFAULT 0,
+  is_archived BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE story (
+  id UUID PRIMARY KEY,
+  owner_id UUID REFERENCES users(id),
+  media_url TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL,
+  view_count INT NOT NULL DEFAULT 0, created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE comments (
+  id UUID PRIMARY KEY,
+  media_id UUID REFERENCES media(id),
+  user_id UUID REFERENCES users(id),
+  body TEXT NOT NULL,
+  parent_id UUID REFERENCES comments(id),
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE likes (
+  id UUID PRIMARY KEY,
+  user_id UUID REFERENCES users(id),
+  media_id UUID REFERENCES media(id),
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE(user_id, media_id)
+);
+
+CREATE TABLE tags (
+  id UUID PRIMARY KEY,
+  name TEXT UNIQUE NOT NULL, usage_count INT NOT NULL DEFAULT 0
+);
+
+CREATE TABLE media_tags (
+  id UUID PRIMARY KEY,
+  media_id UUID REFERENCES media(id),
+  tag_id UUID REFERENCES tags(id),
+  UNIQUE(media_id, tag_id)
+);
+
+CREATE TABLE direct_threads (
+  id UUID PRIMARY KEY,
+  is_group BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE direct_participants (
+  id UUID PRIMARY KEY,
+  thread_id UUID REFERENCES direct_threads(id),
+  user_id UUID REFERENCES users(id),
+  role TEXT NOT NULL DEFAULT 'member',
+  UNIQUE(thread_id,user_id)
+);
+CREATE TABLE direct_messages (
+  id UUID PRIMARY KEY,
+  thread_id UUID REFERENCES direct_threads(id),
+  sender_id UUID REFERENCES users(id),
+  body TEXT, media_url TEXT,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE notifications (
+  id UUID PRIMARY KEY,
+  user_id UUID REFERENCES users(id),
+  type TEXT NOT NULL, -- like|comment|follow|mention|dm
+  ref_type TEXT, ref_id UUID, is_read BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+Representative JSON
+Media:
+
+ { "id":"uuid","owner":{"id":"uuid","username":"alice"},
+  "type":"image","urls":{"items":[{"url":"...","width":1080,"height":1080}]},
+  "caption":"Sunset #vibes","location":null,
+  "counts":{"likes":10,"comments":2},"createdAt":"..." }
+
+
+Endpoints (~60)
+Auth & Profile (9)
+POST /auth/register → {token,user}
+
+
+POST /auth/login → {token,user}
+
+
+POST /auth/refresh
+
+
+POST /auth/logout → 204
+
+
+GET /me → User
+
+
+PATCH /me {fullName,bio,username}
+
+
+POST /me/avatar (multipart)
+
+
+GET /users/:username → public profile
+
+
+GET /users ?q,page,limit → search
+
+
+Follow Graph (6)
+ 10. POST /users/:id/follow → {status:"accepted"|"requested"}
+ 11. DELETE /users/:id/follow → 204
+ 12. GET /users/:id/followers ?page,limit
+ 13. GET /users/:id/following ?page,limit
+ 14. GET /me/follow_suggestions → list
+ 15. POST /follow_requests/:id/approve|decline → 204
+Media (posts) (12)
+ 16. POST /media (multipart: files, caption, tags[]) → Media
+ 17. GET /media/:id
+ 18. DELETE /media/:id (owner)
+ 19. PATCH /media/:id {caption,location,tags[]}
+ 20. POST /media/:id/archive / DELETE /media/:id/archive
+ 21. POST /media/:id/like → counts
+ 22. DELETE /media/:id/like → counts
+ 23. GET /media/:id/likes ?page,limit
+ 24. GET /users/:id/media ?page,limit
+ 25. GET /feed ?page,limit → following feed
+ 26. GET /explore ?page,limit → popular
+ 27. GET /tags/:name/media ?page,limit
+Comments & Mentions (7)
+ 28. GET /media/:id/comments ?page,limit
+ 29. POST /media/:id/comments {body,parentId?} → Comment
+ 30. PATCH /comments/:id {body}
+ 31. DELETE /comments/:id
+ 32. GET /mentions ?page,limit
+ 33. POST /comments/:id/report {reason}
+ 34. POST /media/:id/report {reason}
+Stories (6)
+ 35. POST /stories (multipart media, expiresIn) → Story
+ 36. GET /stories → combined reel from followees
+ 37. GET /users/:id/stories
+ 38. POST /stories/:id/view → increments view
+ 39. DELETE /stories/:id
+ 40. GET /stories/:id/viewers ?page,limit
+Tags & Search (5)
+ 41. GET /tags ?q,page,limit
+ 42. POST /tags (auto-create on media too) (admin/mod)
+ 43. GET /search ?q,type=user|tag|place,page,limit
+ 44. GET /places ?q,page,limit
+ 45. GET /places/:id/media ?page,limit
+Direct Messaging (7)
+ 46. GET /dm/threads ?page,limit
+ 47. POST /dm/threads {participantIds:[...]} → thread
+ 48. GET /dm/threads/:id/messages ?page,limit
+ 49. POST /dm/threads/:id/messages {body,media?}
+ 50. POST /dm/threads/:id/read → 204
+ 51. POST /dm/threads/:id/typing (SSE/ws stub OK)
+ 52. POST /dm/threads/:id/leave → 204
+Notifications & Admin (8)
+ 53. GET /notifications ?page,limit
+ 54. POST /notifications/:id/read
+ 55. GET /admin/users (admin)
+ 56. PATCH /admin/users/:id/verify {is_verified} → User
+ 57. GET /admin/audit_logs
+ 58. GET /admin/trends/tags ?from,to,limit
+ 59. GET /admin/abuse/reports ?status,page,limit
+ 60. POST /admin/abuse/reports/:id/resolve {action}
+Note: Count = 60 (≥50).
+
+Inputs & Outputs: Quick Reference
+Below are concise request/response shapes used repeatedly.
+Common (All Projects)
+List wrapper
+
+ { "data": [/* items */], "page": 1, "limit": 20, "total": 123 }
+
+
+Mutation success
+
+ { "ok": true, "id": "uuid" }
+
+
+Validation error
+
+ { "error": { "code": "VALIDATION_ERROR", "message": "Invalid input", "details": [{"field":"email","msg":"taken"}] } }
+
+
+Amazon — Sample Payloads
+Add to cart (request) { "productId":"uuid", "quantity":2 }
+
+
+Cart (response)
+
+ { "id":"uuid","items":[
+    {"id":"uuid","product":{"id":"p1","title":"Lamp","price":{"amount":1999,"currency":"USD"}},
+     "quantity":2,"price":{"amount":1999,"currency":"USD"}}
+  ],
+  "totals":{"subtotal":3998,"shipping":499,"tax":320,"grandTotal":4817,"currency":"USD"} }
+
+
+Create order (request) { "addressId":"uuid", "paymentProvider":"stripe" }
+
+
+Order status (response) { "id":"uuid","status":"paid","placedAt":"..." }
+
+
+Facebook — Sample Payloads
+Create post (request) { "body":"Hello world","privacy":"friends" }
+
+
+Post (response) as defined earlier, with counts, author, ISO timestamps.
+
+
+Friend request (request) { "toUserId":"uuid" }
+
+
+Friend request list (response) list wrapper of {id, requester, addressee, status, createdAt}.
+
+
+Instagram — Sample Payloads
+Upload media (multipart): files[], caption, tags[], location
+
+
+Like response { "likes": 101, "liked": true }
+
+
+Story create (request) { "expiresIn": 86400 } + file
+
+
+Explore feed (response) list wrapper of Media objects.
+
+
+
+Security, Validation & Notes (for the developer)
+Auth flows: Registration returns access + refresh tokens. Use short-lived access tokens and refresh rotation.
+
+
+Rate limiting: Suggest X-RateLimit-* headers; 429 body uses standard error shape.
+
+
+Idempotency: Payments and order mutations accept Idempotency-Key header.
+
+
+Input validation:
+
+
+Emails RFC 5322; password min 8 chars, 1 upper, 1 lower, 1 digit.
+
+
+Price fields are integer cents.
+
+
+Files: max size, mime allowlists.
+
+
+Privacy checks:
+
+
+Facebook/Instagram visibility (friends/followers) must be enforced at query time.
+
+
+Search:
+
+
+Provide q full-text across names, titles, captions; consider trigram/FTS indexes.
+
+
+
+Minimal Implementation Order (suggested)
+Auth (register/login/me)
+
+
+Core Entity CRUD (Products→Cart→Orders; Posts; Media)
+
+
+Interactions (Reviews/Reactions/Likes/Comments)
+
+
+Feeds (pagination & ranking stubs)
+
+
+Admin/Moderation
+
+
+Payments (mock provider first, wire webhooks)
+
+
+

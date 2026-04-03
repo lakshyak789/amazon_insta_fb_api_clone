@@ -170,7 +170,15 @@ class CartViewSet(viewsets.ModelViewSet):
         return Cart.objects.filter(user=self.request.user)
 
     def get_object(self):
-        cart, _ = Cart.objects.get_or_create(user=self.request.user)
+        try:
+            cart = Cart.objects.get(user=self.request.user)
+        except Cart.DoesNotExist:
+            try:
+                cart, _ = Cart.objects.get_or_create(user=self.request.user)
+            except Exception:
+                cart = Cart.objects.filter(user=self.request.user).first()
+                if not cart:
+                    cart = Cart.objects.create(user=self.request.user)
         return cart
 
     def perform_create(self, serializer):

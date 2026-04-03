@@ -173,6 +173,9 @@ class CartViewSet(viewsets.ModelViewSet):
         cart, _ = Cart.objects.get_or_create(user=self.request.user)
         return cart
 
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
     @action(detail=False, methods=['post'])
     def items(self, request):
         cart, _ = Cart.objects.get_or_create(user=request.user)

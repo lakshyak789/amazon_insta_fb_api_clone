@@ -161,10 +161,10 @@ class AddressViewSet(viewsets.ModelViewSet):
         return Response(AddressSerializer(address).data)
 
 
-class CartViewSet(viewsets.ModelViewSet):
+class CartViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = CartSerializer
     permission_classes = [IsAuthenticated]
-    http_method_names = ['get', 'post', 'patch', 'delete']
+    http_method_names = ['get']
 
     def get_queryset(self):
         return Cart.objects.filter(user=self.request.user)
@@ -180,9 +180,6 @@ class CartViewSet(viewsets.ModelViewSet):
                 if not cart:
                     cart = Cart.objects.create(user=self.request.user)
         return cart
-
-    def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
 
     @action(detail=False, methods=['post'])
     def items(self, request):
